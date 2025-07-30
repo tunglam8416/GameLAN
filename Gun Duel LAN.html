@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gun Duel LAN</title>
+  <style>
+    body { margin: 0; background: #111; overflow: hidden; color: white; font-family: sans-serif; }
+    canvas { background: #222; display: block; margin: auto; border: 2px solid white; }
+    #ui { position: absolute; top: 10px; left: 10px; z-index: 10; display: flex; gap: 10px; }
+    input, select, button { font-size: 16px; padding: 5px; }
+  </style>
+</head>
+<body>
+<div id="ui">
+  <input id="ipInput" placeholder="IP server...">
+  <select id="role">
+    <option value="player1">Player 1</option>
+    <option value="player2">Player 2</option>
+  </select>
+  <button onclick="startGame()">Kết nối</button>
+</div>
+<canvas id="gameCanvas" width="800" height="500"></canvas>
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+let ws, role = "player1", keys = {}, mouse = { x: 0, y: 0 }, currentGun = "pistol";
+let lastShot = 0, lastGrenade = 0;
+const gunStats = {
+  pistol:   { cooldown: 400, color: "#fff", speed: 7, damage: 1 },
+  smg:      { cooldown: 150, color: "#0f0", speed: 8, damage: 1 },
+  shotgun:  { cooldown: 800, color: "#fa0", speed: 6, damage: 0.7, spread: true },
+  laser:    { cooldown: 1000, color: "#0ff", speed: 15, damage: 2 },
+  rocket:   { cooldown: 1200, color: "red", speed: 5, damage: 3 },
+  grenade:  { cooldown: 3000, type: "grenade" },
+  flamethrower: { cooldown: 100, color: "orange", speed: 5, damage: 0.3, flame: true },
+  sniper: { cooldown: 2000, color: "#88f", speed: 20, damage: 5 }
+};
+
+const players = {
+  player1: { x: 100, y: 250, angle: 0, color: "cyan", bullets: [], grenades: [], score: 0, gunsUnlocked: ["pistol"] },
+  player2: { x: 700, y: 250, angle: Math.PI, color: "magenta", bullets: [], grenades: [], score: 0, gunsUnlocked: ["pistol"] }
+};
+
+document.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+document.addEventListener("keyup", e => keys[e.key.toLowerCase()] = false);
+canvas.addEventListener("mousemove", e => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+});
+canvas.addEventListener("mousedown", shoot);
+function shoot() {
+  const now = Date.now();
+  const gun = gunStats[currentGun];
+  if (!gun) return;
+  const p = players[role];
+
+  if (gun.type === "grenade") {
+    if (now - lastGrenade < gun.cooldown) return;
+    lastGrenade = now;
+    const dx = Math.cos(p.angle), dy = Math.sin(p.angle);
+    p.grenades.push({ x: p.x, y: p.y, dx: dx * 5, dy: dy * 5, timer: 1000 });
+    return;
+  }
+
+  if (now - lastShot < gun.cooldown) return;
+  lastShot = now;
+  const dx = Math.cos(p.angle), dy = Math.sin(p.angle);
+  if (gun.flame) {
+    for (let i = 0; i < 5; i++) {
+      const angle = p.angle + (Math.random() - 0.5) * 0.4;
+      p.bullets.push({ x: p.x, y: p.y, dx: Math.cos(angle) * gun.speed, dy: Math.sin(angle) * gun.speed, damage: gun.damage, color: gun.color });
+    }
+  } else if (gun.spread) {
+    for (let i = -1; i <= 1; i++) {
+      const angle = p.angle + i * 0.2;
+      p.bullets.push({ x: p.x, y: p.y, dx: Math.cos(angle) * gun.speed, dy: Math.sin(angle) * gun.speed, damage: gun.damage, color: gun.color });
+    }
+  } else {
+    p.bullets.push({ x: p.x, y: p.y, dx: dx * gun.speed, dy: dy * gun.speed, damage: gun.damage, color: gun.color });
+  }
+}
+function startGame() {
+  role = document.getElementById("role").value;
+  const ip = document.getElementById("ipInput").value.trim();
+  if (!ip) return alert("Nhập IP!");
+  document.getElementById("ui").style.display = "none";
+  const protocol = location.protocol === "https:" ? "wss://" : "ws://";
+  ws = new WebSocket(protocol + ip + ":8765");
+  ws.onopen = () => ws.send(role);
+  ws.onmessage = msg => {
+    const data = JSON.parse(msg.data);
+    if (data.role !== role && data.type === "state") {
+      const p = players[data.role];
+      Object.assign(p, data);
+    }
+  };
+  requestAnimationFrame(update);
+}
+function update() {
+  const p = players[role];
+  const enemy = role === "player1" ? "player2" : "player1";
+  if (keys["w"]) p.y -= 3;
+  if (keys["s"]) p.y += 3;
+  if (keys["a"]) p.x -= 3;
+  if (keys["d"]) p.x += 3;
+
+  const gunList = Object.keys(gunStats);
+  for (let i = 1; i <= gunList.length; i++) {
+    if (keys[i] && p.gunsUnlocked.includes(gunList[i - 1])) currentGun = gunList[i - 1];
+  }
+
+  const dx = mouse.x - p.x, dy = mouse.y - p.y;
+  p.angle = Math.atan2(dy, dx);
+
+  p.bullets.forEach(b => { b.x += b.dx; b.y += b.dy; });
+  p.bullets = p.bullets.filter(b => b.x >= 0 && b.x <= canvas.width && b.y >= 0 && b.y <= canvas.height);
+
+  p.grenades.forEach(g => {
+    g.x += g.dx;
+    g.y += g.dy;
+    g.timer -= 16;
+    if (g.timer <= 0) g.explode = true;
+  });
+
+  p.bullets.forEach((b, i) => {
+    const e = players[enemy];
+    if (Math.hypot(b.x - e.x, b.y - e.y) < 20) {
+      p.score += b.damage;
+      p.bullets.splice(i, 1);
+    }
+  });
+  p.grenades.forEach((g, i) => {
+    if (g.explode && Math.hypot(g.x - players[enemy].x, g.y - players[enemy].y) < 50) {
+      p.score += 3;
+      p.grenades.splice(i, 1);
+    } else if (g.explode) {
+      p.grenades.splice(i, 1);
+    }
+  });
+
+  if (p.score >= 5 && !p.gunsUnlocked.includes("smg")) p.gunsUnlocked.push("smg");
+  if (p.score >= 10 && !p.gunsUnlocked.includes("shotgun")) p.gunsUnlocked.push("shotgun");
+  if (p.score >= 15 && !p.gunsUnlocked.includes("laser")) p.gunsUnlocked.push("laser");
+  if (p.score >= 20 && !p.gunsUnlocked.includes("rocket")) p.gunsUnlocked.push("rocket");
+  if (p.score >= 25 && !p.gunsUnlocked.includes("grenade")) p.gunsUnlocked.push("grenade");
+  if (p.score >= 30 && !p.gunsUnlocked.includes("flamethrower")) p.gunsUnlocked.push("flamethrower");
+  if (p.score >= 40 && !p.gunsUnlocked.includes("sniper")) p.gunsUnlocked.push("sniper");
+
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "state", role, ...p }));
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const r in players) {
+    const pl = players[r];
+    ctx.save(); ctx.translate(pl.x, pl.y); ctx.rotate(pl.angle);
+    ctx.fillStyle = pl.color;
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "white"; ctx.fillRect(0, -3, 20, 6);
+    ctx.restore();
+    pl.bullets.forEach(b => {
+      ctx.fillStyle = b.color;
+      ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI * 2); ctx.fill();
+    });
+    pl.grenades.forEach(g => {
+      ctx.fillStyle = g.explode ? "orange" : "gray";
+      ctx.beginPath(); ctx.arc(g.x, g.y, g.explode ? 20 : 6, 0, Math.PI * 2); ctx.fill();
+    });
+  }
+  ctx.fillStyle = "white";
+  ctx.font = "16px sans-serif";
+  ctx.fillText(`P1: ${players.player1.score.toFixed(1)} | P2: ${players.player2.score.toFixed(1)} | Súng: ${currentGun}`, 10, 20);
+  requestAnimationFrame(update);
+}
+</script>
+</body>
+</html>
